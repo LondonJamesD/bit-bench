@@ -1,13 +1,8 @@
 # Bit Bench
 
+Vibecoded slop game for practicing for my midterm with friends.
+
 A round-based game for practising binary: conversions, 1- and 2-step arithmetic (+ − × ÷), finding a missing operand, and two's complement. Play alone, or in 2–4 player showdowns over a peer-to-peer connection.
-
-## Deploy to Vercel
-
-1. Put this folder in a GitHub repository (or GitLab/Bitbucket).
-2. On vercel.com choose **Add New → Project**, import the repository and press **Deploy**. Vercel detects Next.js automatically; no settings or environment variables are needed.
-
-Or from this folder, with the Vercel CLI:
 
 ```bash
 npx vercel        # preview deployment
