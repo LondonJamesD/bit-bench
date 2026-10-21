@@ -47,7 +47,8 @@ export default function Home() {
           <Solo settings={settings} setSettings={setSettings} mode={mode} setMode={setMode} />
         </div>
         <div hidden={tab !== 'multi'}>
-          <Multiplayer settings={settings} setSettings={setSettings} mode={mode} setMode={setMode} inviteCode={inviteCode} />
+          <Multiplayer settings={settings} setSettings={setSettings} mode={mode} setMode={setMode} inviteCode={inviteCode}
+            visible={tab === 'multi'} />
         </div>
       </main>
     </div>

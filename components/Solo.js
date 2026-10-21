@@ -1,11 +1,15 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
-import { TYPES, makeQuestion, pickType, isCorrect, settingsError } from '../lib/binary';
+import { TYPES, makeQuestion, pickType, isCorrect, settingsError, revealShown, choiceLabel } from '../lib/binary';
+import { sfx } from '../lib/audio';
+import { burstAt, confetti, cssVar } from '../lib/fx';
 import SettingsPanel from './SettingsPanel';
-import ModeToggle from './ModeToggle';
+import ModeToggle, { MODE_NAME } from './ModeToggle';
+import Menu from './Menu';
 import QuestionRows from './QuestionRows';
-import AnswerBox from './AnswerBox';
+import AnswerBox, { ChoiceList } from './AnswerBox';
 import Explain from './Explain';
+import SoundToggles from './SoundToggles';
 
 const typeName = (id) => TYPES.find((t) => t.id === id)?.name;
 
@@ -13,7 +17,9 @@ export default function Solo({ settings, setSettings, mode, setMode }) {
   const [game, setGame] = useState(null); // null = setup screen
   const [err, setErr] = useState('');
   const nextRef = useRef(null);
+  const verdictRef = useRef(null);
   const easy = mode === 'easy';
+  const colors = () => [cssVar('--accent'), cssVar('--good'), cssVar('--p1')];
 
   const withQuestion = (g) => ({ ...g, q: makeQuestion(pickType(g.cfg.weights), g.cfg), answered: false, ok: false, raw: null });
 
@@ -21,31 +27,50 @@ export default function Solo({ settings, setSettings, mode, setMode }) {
     const e = settingsError(settings);
     setErr(e);
     if (e) return;
-    setGame(withQuestion({ cfg: settings, i: 0, total: settings.rounds, results: [], done: false }));
+    setGame(withQuestion({ cfg: settings, i: 0, total: settings.rounds, results: [], done: false, streak: 0, best: 0 }));
     window.scrollTo(0, 0);
   }
   function finishRound(ok, raw) {
-    setGame((g) => ({ ...g, answered: true, ok, raw, results: [...g.results, { type: g.q.type, ok }] }));
+    setGame((g) => {
+      const streak = ok ? g.streak + 1 : 0;
+      return { ...g, answered: true, ok, raw, streak, best: Math.max(g.best, streak), results: [...g.results, { type: g.q.type, ok }] };
+    });
   }
   function next() {
     setGame((g) => (g.i + 1 >= g.total ? { ...g, done: true } : withQuestion({ ...g, i: g.i + 1 })));
   }
 
   useEffect(() => {
-    if (game?.answered) nextRef.current?.focus({ preventScroll: true });
-  }, [game?.answered]);
+    if (!game?.answered) return;
+    nextRef.current?.focus({ preventScroll: true });
+    if (game.ok) {
+      sfx.correct(game.streak);
+      burstAt(verdictRef.current, { colors: colors(), count: 30 + 6 * Math.min(game.streak, 5) });
+    } else if (game.raw !== null) sfx.wrong();
+  }, [game?.answered]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!game?.done) return;
+    const ok = game.results.filter((r) => r.ok).length;
+    if (ok / game.total >= 0.7) {
+      sfx.first();
+      confetti({ colors: colors(), duration: 3000 });
+    }
+  }, [game?.done]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- Setup ----
   if (!game) {
     return (
-      <section className="setup">
-        <div className="setup-head panel">
-          <ModeToggle mode={mode} setMode={setMode} idPrefix="solo-mode" />
-        </div>
-        <SettingsPanel settings={settings} onChange={setSettings} idPrefix="solo" />
-        <div className="startbar">
-          {err && <p className="err">{err}</p>}
+      <section className="card setup">
+        <h2>Practice</h2>
+        <SettingsPanel settings={settings} onChange={setSettings} idPrefix="solo">
+          <Menu label="Difficulty" value={MODE_NAME[mode]}>
+            <ModeToggle mode={mode} setMode={setMode} idPrefix="solo-mode" />
+          </Menu>
+        </SettingsPanel>
+        <div className="row">
           <button type="button" className="primary big-btn" onClick={start}>Start practice</button>
+          {err && <p className="err">{err}</p>}
         </div>
       </section>
     );
@@ -61,6 +86,7 @@ export default function Solo({ settings, setSettings, mode, setMode }) {
           <span className="big">{ok} / {game.total}</span>
           <span className="binscore">{ok.toString(2)} / {game.total.toString(2)} · {Math.round((ok / game.total) * 100)}%</span>
         </div>
+        {game.best >= 2 && <p className="lead">Best streak: 🔥 {game.best} in a row</p>}
         <div className="tablewrap">
           <table>
             <thead><tr><th>Round type</th><th className="num">Correct</th><th className="num">Played</th></tr></thead>
@@ -92,8 +118,10 @@ export default function Solo({ settings, setSettings, mode, setMode }) {
           <span className="round-lbl">Round {game.i + 1} of {game.total}</span>
           <span className="chip">{typeName(q.type)}</span>
           <span className="muted mono">{okCount} correct</span>
+          {game.streak >= 2 && <span className="chip streak">🔥 {game.streak} in a row</span>}
         </div>
         <div className="meta">
+          <SoundToggles music={false} />
           <button type="button" className="ghost" onClick={() => setMode(easy ? 'hard' : 'easy')}>{easy ? 'Easy mode' : 'Hard mode'}</button>
           <button type="button" className="ghost" onClick={() => setGame(null)}>Quit</button>
         </div>
@@ -112,7 +140,7 @@ export default function Solo({ settings, setSettings, mode, setMode }) {
         <h2>{q.prompt}</h2>
         {q.sub && <p className="sub">{q.sub}</p>}
         <QuestionRows q={q} bits={cfg.bits} easy={easy}
-          answer={game.answered ? q.answer : undefined} verdict={game.ok ? 'ok' : 'bad'} />
+          answer={game.answered ? revealShown(q) : undefined} verdict={game.ok ? 'ok' : 'bad'} />
         {!game.answered ? (
           <AnswerBox key={q.id} q={q} bits={cfg.bits} easy={easy}
             onSubmit={(raw, value) => finishRound(isCorrect(q, value, cfg.bits), raw)}>
@@ -120,11 +148,13 @@ export default function Solo({ settings, setSettings, mode, setMode }) {
           </AnswerBox>
         ) : (
           <div className="feedback">
-            <div className={`verdict ${game.ok ? 'ok' : 'bad'}`}>
+            <div ref={verdictRef} className={`verdict ${game.ok ? 'ok' : 'bad'}`}>
               {game.ok ? 'Correct' : game.raw === null ? 'Answer shown' : 'Not quite'}
+              {game.ok && game.streak >= 2 && <span className="mult"> 🔥 {game.streak}</span>}
             </div>
-            {!game.ok && game.raw !== null && <p>You entered <code>{game.raw}</code></p>}
-            <Explain answer={q.answer} lines={q.explain} bits={cfg.bits} />
+            {q.choices && <ChoiceList q={q} picked={game.raw} answer={q.answer} />}
+            {!game.ok && game.raw !== null && !q.choices && <p>You entered <code>{game.raw}</code></p>}
+            <Explain answer={q.answer} lines={q.explain} bits={cfg.bits} label={q.choices ? choiceLabel(q, q.answer) : undefined} />
             <button type="button" className="primary" ref={nextRef} onClick={next}>
               {game.i + 1 >= game.total ? 'See results' : 'Next round'}
             </button>

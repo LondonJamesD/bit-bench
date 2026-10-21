@@ -2,7 +2,7 @@ import './globals.css';
 
 export const metadata = {
   title: 'Bit Bench',
-  description: "Practice binary conversion, arithmetic and two's complement, solo or in 2–4 player showdowns.",
+  description: "Practice binary conversion, arithmetic, two's complement and overflow trivia, solo or in 2–10 player showdowns.",
 };
 
 export const viewport = {

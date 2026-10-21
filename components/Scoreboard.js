@@ -1,10 +1,12 @@
 // Side view of every player: avatar, name, total, a bar against the leader,
-// this round's "+points" under the name, and one pip per finished round.
+// this round's "+points" under the name, a flame for a streak, and one pip per finished round.
+import { fmtMult, streakMult } from '../lib/binary';
+
 const fmtPts = (n) => n.toLocaleString('en-US');
 
 function status(p, phase, winnerId) {
   if (!p.connected) return <span className="muted">Left the game</span>;
-  if (phase === 'lobby') return <span className="muted">{p.mode === 'hard' ? 'Hard mode' : 'Easy mode'}</span>;
+  if (phase === 'lobby') return <span className="muted">Ready</span>;
   if (phase === 'question') {
     return (
       <span className={p.answered ? 'locked' : 'muted'}>
@@ -14,14 +16,18 @@ function status(p, phase, winnerId) {
     );
   }
   if (phase === 'over') {
-    return <span className="muted">{p.history.filter((g) => g > 0).length}/{p.history.length} correct</span>;
+    return (
+      <span className="muted">
+        {p.history.filter((g) => g > 0).length}/{p.history.length} correct{p.best >= 2 ? ` · best streak ${p.best}` : ''}
+      </span>
+    );
   }
   // reveal: show what this round was worth
   if (p.correct) {
     return (
       <span className="gain">
         +{fmtPts(p.gain)}
-        <small> {(p.timeMs / 1000).toFixed(1)}s{p.id === winnerId ? ' · first' : ''}</small>
+        <small> {(p.timeMs / 1000).toFixed(1)}s{p.mult > 1 ? ` · ${fmtMult(p.mult)}` : ''}{p.id === winnerId ? ' · first' : ''}</small>
       </span>
     );
   }
@@ -36,7 +42,7 @@ export default function Scoreboard({ players, myId, hostId, phase, winnerId, tit
   return (
     <section className="panel board">
       <h2>{title}</h2>
-      <ol className="players">
+      <ol className={`players${players.length > 6 ? ' dense' : ''}`}>
         {sorted.map((p) => {
           const rank = 1 + players.filter((o) => o.score > p.score).length;
           const leading = inGame && top > 0 && p.score === top;
@@ -50,6 +56,11 @@ export default function Scoreboard({ players, myId, hostId, phase, winnerId, tit
                   {p.id === myId && <span className="tag">you</span>}
                   {p.id === hostId && <span className="tag">host</span>}
                   {leading && <span className="tag lead">leading</span>}
+                  {inGame && p.streak >= 2 && (
+                    <span className="tag streak" title={`${p.streak} correct in a row. Next correct answer scores ${fmtMult(streakMult(p.streak + 1))}.`}>
+                      🔥 {p.streak}
+                    </span>
+                  )}
                 </div>
                 <div className="pl-status">{status(p, phase, winnerId)}</div>
                 {inGame && (

@@ -1,15 +1,21 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { HostGame, MAX_PLAYERS, MIN_PLAYERS } from '../lib/host';
-import { TYPES, TIME_LIMIT_MS, ORDER_BONUS, roundPoints, settingsError } from '../lib/binary';
+import {
+  TYPES, TIME_LIMIT_MS, QUICK_TIME_MS, ORDER_BONUS, roundPoints, streakMult, fmtMult, choiceLabel, settingsError,
+} from '../lib/binary';
 import { load, save } from '../lib/storage';
+import { sfx, playMusic, stopMusic } from '../lib/audio';
+import { burstAt, confetti, fireworks, cssVar, playerColor } from '../lib/fx';
 import SettingsPanel from './SettingsPanel';
-import ModeToggle from './ModeToggle';
+import ModeToggle, { MODE_NAME } from './ModeToggle';
+import Menu from './Menu';
 import Scoreboard from './Scoreboard';
 import Chat from './Chat';
 import QuestionRows from './QuestionRows';
-import AnswerBox from './AnswerBox';
+import AnswerBox, { ChoiceList } from './AnswerBox';
 import Explain from './Explain';
+import SoundToggles from './SoundToggles';
 
 // Room codes map to a PeerJS id. PeerJS's free cloud server only introduces
 // the browsers to each other; after that, game data flows peer to peer over WebRTC.
@@ -42,17 +48,18 @@ function useNow(active) {
   return now;
 }
 
-function Timer({ ms }) {
+function Timer({ ms, limit }) {
   const s = Math.ceil(ms / 1000);
   return (
     <div className={`timer${s <= 30 ? ' low' : ''}`} aria-label={`${s} seconds left`}>
       <span className="mono">{Math.floor(s / 60)}:{String(s % 60).padStart(2, '0')}</span>
-      <div className="timer-bar"><i style={{ width: `${Math.min(100, (ms / TIME_LIMIT_MS) * 100)}%` }} /></div>
+      <div className="timer-bar"><i style={{ width: `${Math.min(100, (ms / limit) * 100)}%` }} /></div>
     </div>
   );
 }
 
-export default function Multiplayer({ settings, setSettings, mode, setMode, inviteCode }) {
+// visible: false while the Solo tab is showing, which pauses the music and effects.
+export default function Multiplayer({ settings, setSettings, mode, setMode, inviteCode, visible = true }) {
   const [name, setName] = useState('');
   const [code, setCode] = useState('');
   const [screen, setScreen] = useState('entry'); // entry | connecting | room
@@ -65,7 +72,8 @@ export default function Multiplayer({ settings, setSettings, mode, setMode, invi
   const [copied, setCopied] = useState('');
   const net = useRef(null); // { peer, host?, conn?, leaving }
   const now = useNow(!!room && (room.phase === 'question' || room.phase === 'reveal'));
-  const easy = mode === 'easy';
+  const verdictRef = useRef(null);
+  const seen = useRef({ key: '', answered: 0 });
 
   useEffect(() => setName(load('bitbench.name', '')), []);
   useEffect(() => { if (inviteCode) setCode(cleanCode(inviteCode)); }, [inviteCode]);
@@ -103,9 +111,57 @@ export default function Multiplayer({ settings, setSettings, mode, setMode, invi
     else if (n.conn?.open) n.conn.send(msg);
   }
 
+  // The host's Easy/Hard choice applies to the whole room.
   useEffect(() => {
-    if (screen === 'room') send({ type: 'mode', mode });
+    if (screen === 'room' && net.current?.host) send({ type: 'mode', mode });
   }, [mode, screen]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Music follows the game: lobby tune, a round or trivia loop, then the ending theme.
+  const phase = screen === 'room' ? room?.phase : null;
+  const quick = !!room?.round?.q?.choices;
+  useEffect(() => {
+    if (!visible || !phase) return stopMusic();
+    playMusic(phase === 'lobby' ? 'lobby' : phase === 'over' ? 'victory' : quick ? 'trivia' : 'round');
+  }, [phase, quick, visible]);
+  useEffect(() => stopMusic, []);
+
+  // Sounds and particles for the big moments: game start, lock-ins, the reveal and the final standings.
+  useEffect(() => {
+    if (!room || screen !== 'room') return;
+    const s = seen.current;
+    const key = `${room.phase}:${room.round?.q?.id || ''}`;
+    const answered = room.players.filter((p) => p.answered).length;
+    if (key === s.key) {
+      if (visible && room.phase === 'question' && answered > s.answered) sfx.lock();
+      s.answered = answered;
+      return;
+    }
+    Object.assign(s, { key, answered });
+    const me = room.players.find((p) => p.id === myId);
+    if (!me || !visible) return;
+    const mine = [playerColor(me.color), cssVar('--accent'), cssVar('--good')];
+    if (room.phase === 'question' && room.round?.index === 0) sfx.start();
+    else if (room.phase === 'reveal') {
+      if (me.correct) {
+        const first = room.reveal?.winnerId === myId;
+        if (first) sfx.first();
+        else sfx.correct(me.streak);
+        burstAt(verdictRef.current, { colors: mine, count: first ? 70 : 40, power: first ? 12 : 9 });
+      } else if (me.answered) sfx.wrong();
+    } else if (room.phase === 'over') {
+      const top = Math.max(...room.players.map((p) => p.score));
+      if (top <= 0) return;
+      const winners = room.players.filter((p) => p.score === top);
+      confetti({ colors: [...winners.map((p) => playerColor(p.color)), cssVar('--accent')], duration: me.score === top ? 5000 : 2500 });
+      if (me.score === top) fireworks({ colors: mine });
+    }
+  }, [room, myId, screen, visible]);
+
+  // Countdown ticks over the last five seconds.
+  const secsLeft = phase === 'question' ? Math.ceil(Math.max(0, clock.deadline - now) / 1000) : 0;
+  useEffect(() => {
+    if (visible && secsLeft > 0 && secsLeft <= 5) sfx.tick();
+  }, [secsLeft, visible]);
 
   function checkName() {
     const nm = name.trim().slice(0, 16);
@@ -173,7 +229,7 @@ export default function Multiplayer({ settings, setSettings, mode, setMode, invi
       setMyId(id);
       const conn = peer.connect(PREFIX + c, { reliable: true, serialization: 'json' });
       n.conn = conn;
-      conn.on('open', () => conn.send({ type: 'hello', name: nm, mode }));
+      conn.on('open', () => conn.send({ type: 'hello', name: nm }));
       conn.on('data', (msg) => {
         if (!msg || typeof msg !== 'object' || net.current !== n) return;
         if (msg.type === 'state' && msg.state) {
@@ -222,7 +278,7 @@ export default function Multiplayer({ settings, setSettings, mode, setMode, invi
             </div>
           ) : (
             <>
-              <p className="lead">2 to 4 players connect browser to browser. One person hosts, the others join with the room code.</p>
+              <p className="lead">2 to 10 players connect browser to browser. One person hosts, the others join with the room code.</p>
               <div className="field">
                 <label className="lbl" htmlFor="mp-name">Your name</label>
                 <input id="mp-name" type="text" maxLength={16} placeholder="e.g. Ada" value={name}
@@ -252,10 +308,12 @@ export default function Multiplayer({ settings, setSettings, mode, setMode, invi
           <h2>How a showdown works</h2>
           <ul>
             <li>Everyone gets the same question. You have <b>3 minutes</b> and one locked answer.</li>
+            <li>Trivia rounds (overflow checks and multiple choice) are quick: pick one in <b>{QUICK_TIME_MS / 1000} seconds</b>.</li>
             <li>A correct answer is worth <b>1,000 points</b> at the start, falling to <b>100</b> as the clock runs down.</li>
             <li>First correct answer earns <b>+{ORDER_BONUS[0]}</b>, second <b>+{ORDER_BONUS[1]}</b>, third <b>+{ORDER_BONUS[2]}</b>. Wrong answers score 0.</li>
+            <li>Get answers right in a row to build a streak: <b>×1.25</b>, <b>×1.5</b>, <b>×1.75</b>, up to <b>×2</b> points. A miss resets it.</li>
             <li>The round ends when everyone has answered, the time runs out, or a majority votes to skip.</li>
-            <li>Easy and Hard are your own choice. Everyone can see who is playing on which.</li>
+            <li>The host picks the settings and Easy or Hard for everyone.</li>
           </ul>
         </div>
       </section>
@@ -264,6 +322,7 @@ export default function Multiplayer({ settings, setSettings, mode, setMode, invi
 
   // ---------- Room ----------
   const isHost = myId === room.hostId;
+  const easy = room.mode === 'easy';
   const me = room.players.find((p) => p.id === myId) || {};
   const bits = room.settings.bits;
   const r = room.round;
@@ -271,6 +330,7 @@ export default function Multiplayer({ settings, setSettings, mode, setMode, invi
   const live = room.players.filter((p) => p.connected);
   const winner = room.reveal?.winnerId ? room.players.find((p) => p.id === room.reveal.winnerId) : null;
   const lastRound = r && r.index + 1 >= r.total;
+  const limit = r?.limit || TIME_LIMIT_MS;
   const remaining = Math.max(0, clock.deadline - now);
   const nextMs = Math.max(0, clock.nextAt - now);
   const locked = me.answered || (q && pending.q === q.id);
@@ -285,29 +345,31 @@ export default function Multiplayer({ settings, setSettings, mode, setMode, invi
   if (room.phase === 'lobby') {
     const why = live.length < MIN_PLAYERS ? `Waiting for at least ${MIN_PLAYERS} players.` : settingsError(room.settings);
     main = (
-      <>
-        <div className="card lobby-card">
-          <h2>Lobby · {live.length} of {MAX_PLAYERS} players</h2>
-          {isHost ? (
-            <>
-              <p className="hint">Share the room code or invite link. Set up the game below, then start when everyone is in.</p>
-              <div className="row">
-                <button type="button" className="primary big-btn" disabled={!room.canStart} onClick={() => send({ type: 'start' })}>Start game</button>
-                {why && <span className="muted">{why}</span>}
-              </div>
-            </>
-          ) : (
-            <p className="hint">Waiting for the host to start. You can change your own difficulty while you wait.</p>
-          )}
-          <ModeToggle mode={mode} setMode={setMode} idPrefix="mp-mode" />
-        </div>
+      <div className="card lobby-card">
+        <h2>Lobby · {live.length} of {MAX_PLAYERS} players</h2>
+        <p className="hint">
+          {isHost
+            ? 'Share the room code or invite link. Pick the settings, then start when everyone is in.'
+            : 'The host picks the settings. Waiting for them to start.'}
+        </p>
         <SettingsPanel
           settings={isHost ? settings : room.settings}
           onChange={(s) => { setSettings(s); send({ type: 'settings', settings: s }); }}
           readOnly={!isHost}
           idPrefix="mp"
-        />
-      </>
+        >
+          <Menu label="Difficulty" value={MODE_NAME[room.mode]}>
+            <ModeToggle mode={room.mode} setMode={setMode} idPrefix="mp-mode" disabled={!isHost}
+              note={isHost ? 'You set this for everyone.' : 'The host sets this for everyone.'} />
+          </Menu>
+        </SettingsPanel>
+        {isHost && (
+          <div className="row">
+            <button type="button" className="primary big-btn" disabled={!room.canStart} onClick={() => send({ type: 'start' })}>Start game</button>
+            {why && <span className="muted">{why}</span>}
+          </div>
+        )}
+      </div>
     );
   } else if (room.phase === 'over') {
     const sorted = [...room.players].sort((a, b) => b.score - a.score);
@@ -316,16 +378,24 @@ export default function Multiplayer({ settings, setSettings, mode, setMode, invi
     main = (
       <div className="card">
         <h2>Final standings</h2>
-        <p className="lead">{tie ? "It's a tie at the top!" : `${top?.name} wins with ${fmtPts(top?.score || 0)} points.`}</p>
+        <div className={`winner-banner ${tie ? '' : top?.color}`}>
+          <span className="trophy" aria-hidden="true">🏆</span>
+          <div>
+            <p className="big-line">{tie ? "It's a tie at the top!" : top?.id === myId ? 'You win!' : `${top?.name} wins!`}</p>
+            <p className="muted">{fmtPts(top?.score || 0)} points</p>
+          </div>
+        </div>
         <ol className="podium">
-          {sorted.map((p) => {
+          {sorted.map((p, i) => {
             const rank = 1 + room.players.filter((o) => o.score > p.score).length;
             return (
-              <li key={p.id} className={`pl ${p.color}`}>
+              <li key={p.id} className={`pl ${p.color}`} style={{ '--i': i }}>
                 <span className="place">{ordinal(rank)}</span>
                 <span className="avatar" aria-hidden="true">{p.name.slice(0, 1).toUpperCase()}</span>
                 <span className="nm">{p.name}{p.id === myId ? ' (you)' : ''}</span>
-                <span className="muted small">{p.history.filter((g) => g > 0).length}/{p.history.length} correct</span>
+                <span className="muted small">
+                  {p.history.filter((g) => g > 0).length}/{p.history.length} correct{p.best >= 2 ? ` · 🔥 ${p.best}` : ''}
+                </span>
                 <span className="pl-score">{fmtPts(p.score)}</span>
               </li>
             );
@@ -345,24 +415,29 @@ export default function Multiplayer({ settings, setSettings, mode, setMode, invi
     const revealed = room.phase === 'reveal';
     const roundOrder = [...room.players].filter((p) => p.connected || p.answered)
       .sort((a, b) => (b.gain || 0) - (a.gain || 0));
+    const nextMult = streakMult((me.streak || 0) + 1);
     main = (
       <div className="card">
         <div className="round-top">
           <div className="meta">
             <span className="round-lbl">Round {r.index + 1} of {r.total}</span>
             <span className="chip">{typeName(q.type)}</span>
+            {q.choices && <span className="chip quick">⚡ {limit / 1000}s</span>}
           </div>
-          {!revealed && <Timer ms={remaining} />}
+          {!revealed && <Timer ms={remaining} limit={limit} />}
         </div>
         <h2>{q.prompt}</h2>
         {q.sub && <p className="sub">{q.sub}</p>}
         <QuestionRows q={q} bits={bits} easy={easy}
-          answer={revealed ? room.reveal.answer : undefined}
+          answer={revealed ? room.reveal.shown : undefined}
           verdict={revealed ? (me.correct ? 'ok' : me.answered ? 'bad' : '') : undefined} />
 
         {!revealed && !locked && (
           <>
-            <p className="worth">Worth {fmtPts(roundPoints(TIME_LIMIT_MS - remaining, 0))} points if you're first right now.</p>
+            <p className="worth">
+              Worth {fmtPts(Math.round(roundPoints(limit - remaining, 0, limit) * nextMult))} points if you're first right now
+              {nextMult > 1 && <> · <b className="mult">🔥 {fmtMult(nextMult)} streak</b></>}
+            </p>
             <AnswerBox key={q.id} q={q} bits={bits} easy={easy} submitLabel="Lock in"
               onSubmit={(raw) => { setPending({ q: q.id, raw }); send({ type: 'answer', raw }); }}>
               {skipBtn}
@@ -371,7 +446,9 @@ export default function Multiplayer({ settings, setSettings, mode, setMode, invi
         )}
         {!revealed && locked && (
           <div className="locked-box">
-            <p>Locked in: <code>{pending.q === q.id ? pending.raw : '…'}</code></p>
+            {q.choices
+              ? <><p>Locked in:</p><ChoiceList q={q} picked={pending.q === q.id ? pending.raw : null} /></>
+              : <p>Locked in: <code>{pending.q === q.id ? pending.raw : '…'}</code></p>}
             <p className="hint">Waiting for the others. If someone is stuck, vote to skip.</p>
             <div className="row">{skipBtn}</div>
           </div>
@@ -379,11 +456,17 @@ export default function Multiplayer({ settings, setSettings, mode, setMode, invi
 
         {revealed && (
           <div className="feedback">
-            <div className={`verdict ${me.correct ? 'ok' : 'bad'}`}>
+            <div ref={verdictRef} className={`verdict ${me.correct ? 'ok' : 'bad'}`}>
               {me.correct ? `Correct · +${fmtPts(me.gain)}` : me.answered ? 'Not quite · +0' : 'No answer · +0'}
+              {me.correct && me.mult > 1 && <span className="mult"> 🔥 {fmtMult(me.mult)}</span>}
             </div>
-            {me.answered && !me.correct && <p>You entered <code>{me.raw}</code></p>}
-            <Explain answer={room.reveal.answer} lines={room.reveal.explain} bits={bits} />
+            {me.correct && me.streak >= 2 && (
+              <p className="hint">{me.streak} in a row. Next correct answer scores {fmtMult(streakMult(me.streak + 1))}.</p>
+            )}
+            {q.choices && <ChoiceList q={q} picked={me.raw} answer={room.reveal.answer} />}
+            {me.answered && !me.correct && !q.choices && <p>You entered <code>{me.raw}</code></p>}
+            <Explain answer={room.reveal.answer} lines={room.reveal.explain} bits={bits}
+              label={q.choices ? choiceLabel(q, room.reveal.answer) : undefined} />
             <div className="round-results">
               <span className="lbl-sm">This round</span>
               <p>{winner ? `${winner.name} was first, in ${(winner.timeMs / 1000).toFixed(1)}s.` : 'Nobody got this one.'}</p>
@@ -424,9 +507,10 @@ export default function Multiplayer({ settings, setSettings, mode, setMode, invi
           {copied && <span className="note">{copied}</span>}
         </div>
         <div className="meta">
-          {room.phase !== 'lobby' && (
-            <button type="button" className="ghost" onClick={() => setMode(easy ? 'hard' : 'easy')}>{easy ? 'Easy mode' : 'Hard mode'}</button>
-          )}
+          {room.phase !== 'lobby' && (isHost
+            ? <button type="button" className="ghost" onClick={() => setMode(easy ? 'hard' : 'easy')}>{easy ? 'Easy mode' : 'Hard mode'}</button>
+            : <span className="chip">{easy ? 'Easy mode' : 'Hard mode'}</span>)}
+          <SoundToggles />
           <button type="button" className="ghost" onClick={() => reset()}>Leave room</button>
         </div>
       </div>

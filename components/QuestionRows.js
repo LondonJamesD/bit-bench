@@ -31,6 +31,7 @@ function Weights({ bits, signed }) {
 
 // answer: shown in the "?" row once revealed. verdict: 'ok' | 'bad' | undefined.
 export default function QuestionRows({ q, bits, easy, answer, verdict }) {
+  if (!q.rows.length) return null;
   const N = num(bits);
   const revealed = answer !== undefined && answer !== null;
   const out = [];

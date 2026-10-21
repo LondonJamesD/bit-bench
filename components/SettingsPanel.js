@@ -2,12 +2,14 @@
 import { useEffect, useState } from 'react';
 import { TYPES, PRESETS, SYM, ROUND_OPTIONS, num, fmtDec } from '../lib/binary';
 import { load, save } from '../lib/storage';
+import Menu from './Menu';
 
 const OP_TITLE = { add: 'Addition', sub: 'Subtraction', mul: 'Multiplication', div: 'Division' };
 
-// Game settings + round mix with saved profiles.
+// Game settings + round mix with saved profiles, as a row of dropdown menus.
+// children: extra menus to put first (Difficulty).
 // readOnly: other players in a room see the host's settings but can't change them.
-export default function SettingsPanel({ settings, onChange, readOnly = false, idPrefix = 's' }) {
+export default function SettingsPanel({ settings, onChange, readOnly = false, idPrefix = 's', children }) {
   const [profiles, setProfiles] = useState({});
   const [name, setName] = useState('');
   const [msg, setMsg] = useState({ err: '', note: '' });
@@ -57,11 +59,12 @@ export default function SettingsPanel({ settings, onChange, readOnly = false, id
     setMsg({ err: '', note: `Deleted “${n}”. Its mix is still loaded.` });
   }
 
+  const profileName = profileKey === 'custom' ? 'Custom' : profileKey.slice(2);
   let lastGroup = '';
   return (
-    <fieldset className="settings" disabled={readOnly}>
-      <div className="panel">
-        <h2>Game</h2>
+    <fieldset className="menus" disabled={readOnly}>
+      {children}
+      <Menu label="Game" value={`${settings.bits} bits · ${settings.rounds} rounds`}>
         <div className="field">
           <label className="lbl" htmlFor={`${idPrefix}-bits`}>
             Register width <output>{settings.bits} bits</output>
@@ -102,10 +105,9 @@ export default function SettingsPanel({ settings, onChange, readOnly = false, id
           </div>
           <p className="hint">Division always comes out exact. Results stay inside the register.</p>
         </div>
-      </div>
+      </Menu>
 
-      <div className="panel">
-        <h2>Round mix</h2>
+      <Menu label="Round mix" value={profileName}>
         <div className="field">
           <label className="lbl" htmlFor={`${idPrefix}-profile`}>Profile</label>
           <div className="row">
@@ -145,7 +147,7 @@ export default function SettingsPanel({ settings, onChange, readOnly = false, id
             );
           })}
         </div>
-        <p className="hint">Each slider sets how often that round type comes up. 0 turns it off.</p>
+        <p className="hint">Each slider sets how often that round type comes up. 0 turns it off. Trivia rounds get a 30-second clock in showdowns.</p>
         {!readOnly && (
           <div className="field">
             <label className="lbl" htmlFor={`${idPrefix}-pname`}>Save this mix as a profile</label>
@@ -158,7 +160,7 @@ export default function SettingsPanel({ settings, onChange, readOnly = false, id
             {msg.note && <p className="note">{msg.note}</p>}
           </div>
         )}
-      </div>
+      </Menu>
     </fieldset>
   );
 }
