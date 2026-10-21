@@ -4,20 +4,6 @@ Vibecoded slop game for practicing for my midterm with friends.
 
 A round-based game for practising binary: conversions, 1- and 2-step arithmetic (+ − × ÷), finding a missing operand, and two's complement. Play alone, or in 2–4 player showdowns over a peer-to-peer connection.
 
-```bash
-npx vercel        # preview deployment
-npx vercel --prod # production
-```
-
-## Run locally
-
-```bash
-npm install
-npm run dev       # http://localhost:3000
-```
-
-Requires Node.js 18.18 or newer.
-
 ## Features
 
 - **Solo practice** with Easy/Hard modes, adjustable register width (4–16 bits, default 8), answer format (binary, decimal or mixed), operation toggles, and a weighted round mix you can save as named profiles.
