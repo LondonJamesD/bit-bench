@@ -1,6 +1,7 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { HostGame, MAX_PLAYERS, MIN_PLAYERS } from '../lib/host';
+import { hostRoom, joinRoom as joinRelayRoom } from '../lib/relay';
 import {
   TYPES, TIME_LIMIT_MS, QUICK_TIME_MS, ORDER_BONUS, roundPoints, streakMult, fmtMult, choiceLabel, settingsError,
 } from '../lib/binary';
@@ -17,9 +18,7 @@ import AnswerBox, { ChoiceList } from './AnswerBox';
 import Explain from './Explain';
 import SoundToggles from './SoundToggles';
 
-// Room codes map to a PeerJS id. PeerJS's free cloud server only introduces
-// the browsers to each other; after that, game data flows peer to peer over WebRTC.
-const PREFIX = 'bitbench-p2p-7k3-';
+// Players connect through Ably (see lib/relay.js). The host's browser still runs the match.
 const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const makeCode = () => Array.from({ length: 5 }, () => ALPHABET[Math.floor(Math.random() * ALPHABET.length)]).join('');
 const cleanCode = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5);
@@ -29,12 +28,10 @@ const ordinal = (n) => ['1st', '2nd', '3rd', '4th'][n - 1] || `${n}th`;
 
 function errorText(err) {
   switch (err?.type) {
-    case 'browser-incompatible': return "This browser doesn't support WebRTC. Try a recent Chrome, Edge, Firefox or Safari.";
-    case 'network':
-    case 'server-error':
-    case 'socket-error':
-    case 'socket-closed': return "Couldn't reach the connection server. Check your internet and try again.";
-    default: return `Connection problem (${err?.type || 'unknown'}). Try again.`;
+    case 'not-configured': return "Multiplayer isn't set up on this site yet: the server is missing its ABLY_API_KEY.";
+    case 'host-left': return 'The host closed the room or lost their connection.';
+    case 'lost': return 'Lost the connection to the game server. Check your internet and join again.';
+    default: return "Couldn't reach the game server. Check your internet and try again.";
   }
 }
 
@@ -70,7 +67,7 @@ export default function Multiplayer({ settings, setSettings, mode, setMode, invi
   const [clock, setClock] = useState({ deadline: 0, nextAt: 0 });
   const [pending, setPending] = useState({ q: null, raw: '' }); // my answer, before the host confirms it
   const [copied, setCopied] = useState('');
-  const net = useRef(null); // { peer, host?, conn?, leaving }
+  const net = useRef(null); // { relay, host? (when hosting), leaving, ... }
   const now = useNow(!!room && (room.phase === 'question' || room.phase === 'reveal'));
   const verdictRef = useRef(null);
   const seen = useRef({ key: '', answered: 0 });
@@ -92,7 +89,7 @@ export default function Multiplayer({ settings, setSettings, mode, setMode, invi
     if (!n) return;
     n.leaving = true;
     n.host?.destroy();
-    try { n.peer.destroy(); } catch { /* already gone */ }
+    n.relay?.close();
   }
   function reset(message = '') {
     teardown();
@@ -103,12 +100,12 @@ export default function Multiplayer({ settings, setSettings, mode, setMode, invi
   }
 
   // Everything a player does goes through here. The host handles its own
-  // messages directly; everyone else sends them over their data channel.
+  // messages directly; everyone else sends them through the relay.
   function send(msg) {
     const n = net.current;
     if (!n) return;
     if (n.host) n.host.handle(n.host.hostId, msg);
-    else if (n.conn?.open) n.conn.send(msg);
+    else n.relay?.send(msg);
   }
 
   // The host's Easy/Hard choice applies to the whole room.
@@ -175,40 +172,25 @@ export default function Multiplayer({ settings, setSettings, mode, setMode, invi
     const nm = checkName();
     if (!nm) return;
     setScreen('connecting');
-    const { Peer } = await import('peerjs');
-    const open = (attempt) => {
-      const c = makeCode();
-      const peer = new Peer(PREFIX + c, { debug: 0 });
-      const n = { peer, host: null, leaving: false };
-      net.current = n;
-      peer.on('open', (id) => {
-        if (net.current !== n) return;
-        setChat([]);
-        n.host = new HostGame({ code: c, hostId: id, hostName: nm, hostMode: mode, settings, onState: applyState, onChat: addChat });
-        setMyId(id);
-        setScreen('room');
-        n.host.system(`Room ${c} is open. Share the code to invite up to ${MAX_PLAYERS - 1} more players.`);
-        n.host.sync();
+    const n = { relay: null, host: null, leaving: false };
+    net.current = n;
+    try {
+      const relay = await hostRoom(makeCode);
+      if (net.current !== n) return relay.close();
+      n.relay = relay;
+      setChat([]);
+      n.host = new HostGame({
+        code: relay.code, hostId: relay.id, hostName: nm, hostMode: mode, settings,
+        onState: applyState, onChat: addChat, broadcast: (msg) => relay.publish(msg),
       });
-      peer.on('connection', (conn) => {
-        if (n.host) n.host.attach(conn);
-        else conn.close();
-      });
-      // Losing the introduction server doesn't break existing connections; reconnect quietly.
-      peer.on('disconnected', () => { if (!n.leaving && !peer.destroyed) peer.reconnect(); });
-      peer.on('error', (err) => {
-        if (n.leaving) return;
-        if (err.type === 'unavailable-id' && attempt < 4) {
-          n.leaving = true;
-          peer.destroy();
-          open(attempt + 1);
-          return;
-        }
-        if (n.host) return console.warn('Bit Bench host:', err.type); // one player's link failed; the room keeps going
-        reset(errorText(err));
-      });
-    };
-    open(0);
+      await relay.listen((conn) => n.host?.attach(conn), (err) => { if (!n.leaving) reset(errorText(err)); });
+      setMyId(relay.id);
+      setScreen('room');
+      n.host.system(`Room ${relay.code} is open. Share the code to invite up to ${MAX_PLAYERS - 1} more players.`);
+      n.host.sync();
+    } catch (err) {
+      if (net.current === n) reset(errorText(err));
+    }
   }
 
   async function joinRoom(e) {
@@ -218,40 +200,42 @@ export default function Multiplayer({ settings, setSettings, mode, setMode, invi
     const c = cleanCode(code);
     if (c.length !== 5) return setError('Room codes are 5 characters.');
     setScreen('connecting');
-    const { Peer } = await import('peerjs');
-    const peer = new Peer({ debug: 0 });
-    const n = { peer, conn: null, leaving: false, gotState: false, rejected: '' };
+    // welcomed: the host let us in (it sends the chat log first). Until then,
+    // room-wide messages are ignored, so a rejected player never sees the room.
+    const n = { relay: null, leaving: false, welcomed: false, gotState: false, rejected: '' };
     net.current = n;
-    const notFound = `Couldn't find room ${c}. Check the code, and make sure the host still has the page open.`;
-    const timeout = setTimeout(() => { if (net.current === n && !n.gotState) reset(n.rejected || notFound); }, 15000);
-    peer.on('open', (id) => {
-      if (net.current !== n) return;
-      setMyId(id);
-      const conn = peer.connect(PREFIX + c, { reliable: true, serialization: 'json' });
-      n.conn = conn;
-      conn.on('open', () => conn.send({ type: 'hello', name: nm }));
-      conn.on('data', (msg) => {
-        if (!msg || typeof msg !== 'object' || net.current !== n) return;
-        if (msg.type === 'state' && msg.state) {
-          n.gotState = true;
-          clearTimeout(timeout);
-          applyState(msg.state);
-          setScreen('room');
-        } else if (msg.type === 'chat' && msg.message) addChat(msg.message);
-        else if (msg.type === 'chatlog' && Array.isArray(msg.messages)) setChat(msg.messages.slice(-100));
-        else if (msg.type === 'reject') n.rejected = String(msg.reason || 'The host could not let you in.');
-      });
-      conn.on('close', () => {
-        if (n.leaving) return;
-        clearTimeout(timeout);
-        reset(n.rejected || (n.gotState ? 'The host closed the room or lost their connection.' : notFound));
-      });
-    });
-    peer.on('error', (err) => {
-      if (n.leaving) return;
-      if (err.type === 'peer-unavailable') { clearTimeout(timeout); reset(notFound); }
-      else if (!n.gotState) { clearTimeout(timeout); reset(errorText(err)); }
-    });
+    const live = () => net.current === n && !n.leaving;
+    const onMessage = (msg) => {
+      if (!msg || typeof msg !== 'object' || !live()) return;
+      if (msg.type === 'chatlog' && Array.isArray(msg.messages)) {
+        n.welcomed = true;
+        setChat(msg.messages.slice(-100));
+      } else if (msg.type === 'reject') n.rejected = String(msg.reason || 'The host could not let you in.');
+      else if (msg.type === 'bye') reset(n.rejected || 'The host removed you from the room.');
+      else if (!n.welcomed) return;
+      else if (msg.type === 'chat' && msg.message) addChat(msg.message);
+      else if (msg.type === 'state' && msg.state) {
+        const me = msg.state.players.find((p) => p.id === n.relay?.id);
+        if (!me || !me.connected) {
+          if (n.gotState) reset('You lost connection to the room. Join again to keep playing.');
+          return;
+        }
+        n.gotState = true;
+        applyState(msg.state);
+        setScreen('room');
+      }
+    };
+    try {
+      const relay = await joinRelayRoom(c, { onMessage, onClose: (err) => { if (live()) reset(n.rejected || errorText(err)); } });
+      if (net.current !== n) return relay?.close();
+      if (!relay) return reset(`Couldn't find room ${c}. Check the code, and make sure the host still has the page open.`);
+      n.relay = relay;
+      setMyId(relay.id);
+      relay.send({ type: 'hello', name: nm });
+      setTimeout(() => { if (live() && !n.gotState) reset(n.rejected || "The host didn't answer. Try joining again."); }, 15000);
+    } catch (err) {
+      if (net.current === n) reset(errorText(err));
+    }
   }
 
   async function copy(text, label) {
